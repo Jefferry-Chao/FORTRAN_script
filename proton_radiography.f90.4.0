@@ -1,0 +1,629 @@
+!*************************************************************************
+!***File Name: proton_radiography.f90
+!***Author: Zhonghai Zhao
+!***Mail: zhaozhonghi@126.com 
+!***Created Time: 2018年01月23日 星期二 14时08分11秒
+!*************************************************************************
+! define constants and data type
+MODULE shared_data
+    IMPLICIT NONE
+    INTEGER, PARAMETER :: num = KIND(1.d0)
+    REAL(num), PARAMETER :: pi = 3.141592653589793238462643383279503_num
+    REAL(num), PARAMETER :: n0 = 0.2187e26_num
+    REAL(num), PARAMETER :: qe = 1.602176565e-19_num
+    REAL(num), PARAMETER :: me = 9.10938291e-31_num
+    REAL(num), PARAMETER :: mi = 100*me
+    REAL(num), PARAMETER :: c = 2.99792458e8_num
+    REAL(num), PARAMETER :: epsilon0 = 8.854187817620389850e-12_num
+    REAL(num), PARAMETER :: rhoe = 9.0e28_num
+    REAL(num), PARAMETER :: wpi = SQRT(n0*qe*qe/epsilon0/me/100.0)
+    REAL(num), PARAMETER :: di = c/wpi
+    REAL(num), PARAMETER :: magnification = 7.0
+    REAL(num), PARAMETER :: division = 10
+    REAL(num), PARAMETER :: x0 = 2.0
+    REAL(num), PARAMETER :: y0 = 30.0
+    REAL(num), PARAMETER :: z0 = 30.0
+    REAL(num), PARAMETER :: theta = 10.0
+    REAL(num), PARAMETER :: l0 = -(ANINT(25.0/TAN(pi*theta/180.0)))
+    REAL(num), PARAMETER :: lx = 10
+    INTEGER, PARAMETER :: nx = lx*division, ny = 2*y0*division*magnification, nz = 2*z0*division*magnification
+    INTEGER, PARAMETER :: x_min = (x0-l0)*magnification+l0, x_max = x_min + lx
+    INTEGER, PARAMETER :: y_min = -y0*magnification, y_max = y0*magnification
+    INTEGER, PARAMETER :: z_min = -z0*magnification, z_max = z0*magnification
+    REAL(num), PARAMETER :: rcf_x_min1 = 10*di
+    REAL(num), PARAMETER :: rcf_x_max1 = 12*di
+    REAL(num), PARAMETER :: rcf_x_min2 = 16*di
+    REAL(num), PARAMETER :: rcf_x_max2 = 18*di
+    REAL(num), PARAMETER :: rcf_x_min3 = 22*di
+    REAL(num), PARAMETER :: rcf_x_max3 = 24*di
+    REAL(num), PARAMETER :: rcf_x_min4 = 26*di
+    REAL(num), PARAMETER :: rcf_x_max4 = 28*di
+    REAL(num), PARAMETER :: rcf_x_min = (x_min + 1)*di
+    REAL(num), PARAMETER :: rcf_x_max = (x_max - 1)*di
+    REAL(num), PARAMETER :: rcf_y_min = y_min*di
+    REAL(num), PARAMETER :: rcf_y_max = y_max*di
+    REAL(num), PARAMETER :: rcf_z_min = z_min*di
+    REAL(num), PARAMETER :: rcf_z_max = z_max*di
+    REAL(num), PARAMETER :: z = 3.0_num
+    REAL(num), PARAMETER :: si = LOG(4./(10.*qe))
+    REAL(num), PARAMETER :: s0 = 200*(2*pi*(qe**4)*(z**2)*rhoe)/((4*pi*epsilon0)**2)
+    REAL(num), PARAMETER :: ek = 2.e6 * qe
+    REAL(num), PARAMETER :: v0 = SQRT(2*ek/mi)
+    REAL(num), PARAMETER :: t0 = di/v0
+    REAL(num), PARAMETER :: fx = (x_max - x_min)*di
+    REAL(num), PARAMETER :: fy = (y_max - y_min)*di
+    REAL(num), PARAMETER :: fz = (z_max - z_min)*di
+    REAL(num), PARAMETER :: dx = (x_max*di - x_min*di)/FLOAT(nx)
+    REAL(num), PARAMETER :: dy = (y_max*di - y_min*di)/FLOAT(ny)
+    REAL(num), PARAMETER :: dz = (z_max*di - z_min*di)/FLOAT(nz)
+    INTEGER, PARAMETER :: sf_min = -1
+    INTEGER, PARAMETER :: sf_max = 1
+    INTEGER, PARAMETER :: MAX_STEP = 1000
+    LOGICAL, PARAMETER :: continous = .FALSE.
+    LOGICAL, PARAMETER :: write_density = .FALSE.
+    ! data type
+    TYPE :: particle
+        REAL(num), DIMENSION(3) :: positions
+        REAL(num), DIMENSION(3) :: momentum
+        REAL(num), DIMENSION(3) :: energy_positions
+        REAL(num), DIMENSION(3) :: cos_theta
+        REAL(num) :: weight
+        REAL(num) :: energy_diposition
+        REAL(num) :: energy
+        TYPE (particle), POINTER :: prev
+        TYPE (particle), POINTER :: next
+    END TYPE particle
+    TYPE :: axis
+        REAL(num), DIMENSION(-2:nx+3) :: x
+        REAL(num), DIMENSION(-2:ny+3) :: y
+        REAL(num), DIMENSION(-2:nz+3) :: z
+    END TYPE axis
+END MODULE shared_data
+MODULE gemetry
+    USE shared_data
+    IMPLICIT NONE
+    INTEGER :: i, j, k
+    CONTAINS
+        FUNCTION read_data(n) RESULT(head)
+            TYPE (particle), POINTER :: head
+            TYPE (particle), POINTER :: tail
+            INTEGER :: istat = 0
+            REAL(num) :: values = 1
+            REAL(num) :: p
+            !INTEGER :: i, j, k
+            INTEGER , INTENT(INOUT):: n
+            NULLIFY(head)
+            NULLIFY(tail)
+            OPEN (UNIT=1, FILE='5.dat', ACCESS='DIRECT', FORM='UNFORMATTED', STATUS='OLD', &
+                  RECL=num, IOSTAT=istat)
+            fileopen : IF (istat .EQ. 0) THEN
+                readparticle : DO
+                    IF (.NOT. ASSOCIATED(head)) THEN
+                        ALLOCATE(head, STAT=istat)
+                        tail => head
+                    ELSE
+                        ALLOCATE(tail%next, STAT=istat)
+                        ALLOCATE(tail%next%prev, STAT=istat)
+                        tail%next%prev => tail
+                        tail => tail%next
+                    END IF
+                    NULLIFY (tail%next)
+                    ! read data
+                    readdata : DO j = 1, 7, 1
+                        n = n + 1
+                        READ(1, IOSTAT=istat, REC=n) values
+                        IF (istat .NE. 0) THEN
+                            EXIT
+                        ELSE
+                            IF (j .LT. 7) THEN
+                                IF (MOD(j, 2) .NE. 0) THEN
+                                    tail%positions((j+1)/2) = values
+                                ELSE
+                                    tail%momentum(j/2) = values
+                                END IF
+                            ELSE
+                                tail%weight = values
+                            END IF
+                        END IF
+                    END DO readdata
+                    tail%energy_positions(:) = tail%positions(:)
+                    tail%energy_diposition = 0._num
+                    p  = SQRT(tail%momentum(1)**2 + tail%momentum(2)**2 + tail%momentum(3)**2)
+                    tail%energy  = p*p/2.0/mi
+                    DO k = 1, 3, 1
+                        tail%cos_theta(k) = tail%momentum(k)/p
+                    END DO
+                    IF (istat .NE. 0) exit
+                    !WRITE (*, *) tail%positions
+                END DO readparticle
+            ELSE
+                WRITE (*, *) 'Open file failed!'
+            END IF fileopen
+            n = (n-1)/7
+        END FUNCTION read_data
+        ! define axis
+        TYPE (axis) FUNCTION define_axis()
+            TYPE (axis) :: cordinate
+            !INTEGER :: i
+            ! axis x
+            DO i = -2, nx+3, 1
+                define_axis%x(i) = x_min*di + i*dx - dx/2.
+            END DO
+            ! axis y
+            DO i = -2, ny+3, 1
+                define_axis%y(i) = y_min*di + i*dy - dy/2.
+            END DO
+            ! axis z
+            DO i = -2, nz+3, 1
+                define_axis%z(i) = z_min*di + i*dz - dz/2.
+            END DO
+        END FUNCTION define_axis
+        SUBROUTINE write_array(array, filename)
+            REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3), INTENT(IN) :: array
+            CHARACTER(len=*), INTENT(IN) :: filename
+            !INTEGER :: i, j, k
+            INTEGER :: istat
+            INTEGER :: total = 0
+
+            OPEN(UNIT=1, FILE=(filename//'.dat'), ACCESS='DIRECT', FORM='UNFORMATTED', &
+                 STATUS='REPLACE', RECL=num, IOSTAT=istat)
+            total = 0
+            DO k = 1, nz, 1
+                DO j = 1, ny, 1
+                    DO i = 1, nx, 1
+                        total = total + 1
+                        WRITE(1, REC=total) array(i, j, k)
+                    END DO
+                END DO
+            END DO
+            CLOSE(UNIT=1)
+        END SUBROUTINE write_array
+        SUBROUTINE write_vector(vector, length, filename)
+            !REAL(num), ALLOCATABLE, DIMENSION(:), INTENT(IN) :: vector
+            REAL(num), DIMENSION(length), INTENT(IN) :: vector
+            INTEGER, INTENT(IN) :: length
+            CHARACTER(len=*), INTENT(IN) :: filename
+            !INTEGER :: i
+            INTEGER :: istat, statu
+            INTEGER :: total = 0
+
+            !ALLOCATE(vector(length), STAT=statu)
+            OPEN(UNIT=1, FILE=(filename//'.dat'), ACCESS='DIRECT', FORM='UNFORMATTED', &
+                 STATUS='REPLACE', RECL=num, IOSTAT=istat)
+            total = 0
+            DO i = 1, length, 1
+                total = total + 1
+                WRITE(1, REC=total) vector(i)
+            END DO
+            CLOSE(UNIT=1)
+        END SUBROUTINE write_vector
+
+END MODULE gemetry
+MODULE particle_to_grid
+    USE shared_data
+    IMPLICIT NONE
+    CONTAINS
+        SUBROUTINE copied_grid(positions, point, gx, gy, gz, grid)
+            REAL(num), DIMENSION(3) , INTENT(IN):: positions
+            REAL(num), DIMENSION(sf_min:sf_max), INTENT(INOUT) :: gx, gy, gz
+            REAL(num), DIMENSION(3), INTENT(INOUT) :: point
+            INTEGER, DIMENSION(3), INTENT(INOUT) :: grid
+            INTEGER, DIMENSION(sf_min:sf_max) :: lx, ly, lz
+            INTEGER :: i, j, k
+            point(1) = (positions(1) - x_min*di)/dx + 0.5
+            point(2) = (positions(2) - y_min*di)/dy + 0.5
+            point(3) = (positions(3) - z_min*di)/dz + 0.5
+            DO i = 1, 3, 1
+                grid(i) = ANINT(point(i))
+            END DO
+            !WRITE (*, *) 'point = ', point
+            DO i = sf_min, sf_max, 1
+                lx(i) = grid(1) + i
+                ly(i) = grid(2) + i
+                lz(i) = grid(3) + i
+            END DO
+            ! center
+            gx(0) = 0.75 - (point(1) - lx(0))**2
+            gy(0) = 0.75 - (point(2) - ly(0))**2
+            gz(0) = 0.75 - (point(3) - lz(0))**2
+            ! side
+            DO i = sf_min, sf_max, 2
+                gx(i) = 0.5 * (1.5 - ABS(point(1) - lx(i)))**2
+                gy(i) = 0.5 * (1.5 - ABS(point(2) - ly(i)))**2
+                gz(i) = 0.5 * (1.5 - ABS(point(3) - lz(i)))**2
+            END DO
+        END SUBROUTINE copied_grid
+        SUBROUTINE update_array(array, weight, sum_array, gx, gy, gz, grid)
+            REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3), INTENT(INOUT) :: array
+            REAL(num), INTENT(IN) :: weight
+            REAL(num), INTENT(INOUT) :: sum_array
+            REAL(num), DIMENSION(-1:1), INTENT(IN) :: gx, gy, gz
+            INTEGER, DIMENSION(3), INTENT(IN) :: grid
+            REAL(num) :: grid_gain
+            INTEGER :: i, j, k
+            REAL(num) :: sums = 0
+
+            DO k = sf_min, sf_max, 1
+                DO j = sf_min, sf_max, 1
+                    DO i = sf_min, sf_max, 1
+                        grid_gain = weight * gx(i) * gy(j) * gz(k)
+                        array(grid(1)+i, grid(2)+j, grid(3)+k) = &
+                            array(grid(1)+i, grid(2)+j, grid(3)+k) + grid_gain
+                        sum_array = sum_array + grid_gain
+                        !WRITE(*, *) density(grid(1)+i, grid(2)+j, grid(3)+k)
+                        !sums = sums + density(grid(1)+i, grid(2)+j, grid(3)+k)
+                    END DO
+                END DO
+            END DO
+            !WRITE(*, *) weight
+            !WRITE(*, *) sums
+        END SUBROUTINE update_array
+        SUBROUTINE ifindomain(grid, ifdomain)
+            INTEGER, DIMENSION(3), INTENT(IN) :: grid
+            LOGICAL, INTENT(INOUT) :: ifdomain
+            LOGICAL :: ifx, ify, ifz
+            ifx = (grid(1) .GE. 1) .AND. (grid(1) .LE. nx)
+            ify = (grid(2) .GE. 1) .AND. (grid(2) .LE. ny)
+            ifz = (grid(3) .GE. 1) .AND. (grid(3) .LE. nz)
+            ifdomain = ifx .AND. ify .AND. ifz
+        END SUBROUTINE ifindomain
+        SUBROUTINE deleteparticle(ptr, head, total_particle)
+            TYPE (particle), POINTER, INTENT(IN) :: ptr
+            TYPE (particle), POINTER, INTENT(INOUT) :: head
+            INTEGER, INTENT(INOUT) :: total_particle
+            IF (ASSOCIATED(ptr%prev)) THEN
+                ptr%prev%next => ptr%next
+            ELSE
+                head => ptr%next
+            END IF
+            IF (ASSOCIATED(ptr%next)) THEN
+                ptr%next%prev => ptr%prev
+            ELSE
+                !NULLIFY(ptr%prev%next)
+            END IF
+            total_particle = total_particle - 1
+        END SUBROUTINE deleteparticle
+        SUBROUTINE migration(ptr, grid)
+            TYPE (particle), POINTER, INTENT(IN) :: ptr
+            INTEGER, DIMENSION(3), INTENT(IN) :: grid
+            REAL(num), DIMENSION(3) :: positions
+            ! migration x
+            IF (grid(1) .LT. 1) THEN
+                ptr%positions(1) = ptr%positions(1) + fx
+                !WRITE(*, *) 'migration right'
+            ELSE IF (grid(1) .GT. nx) THEN
+                ptr%positions(1) = ptr%positions(1) - fx
+                !WRITE(*, *) 'migration left'
+            ELSE
+                !ptr%positions(1) = ptr%positions(1)
+                !WRITE(*, *) 'not migration'
+            END IF
+            ! migration y
+            IF (grid(2) .LT. 1) THEN
+                ptr%positions(2) = ptr%positions(2) + fy
+            ELSE IF (grid(2) .GT. ny) THEN
+                ptr%positions(2) = ptr%positions(2) - fy
+            ELSE
+                !ptr%positions(2) = ptr%positions(2)
+            END IF
+            ! migration z
+            IF (grid(3) .LT. 1) THEN
+                ptr%positions(3) = ptr%positions(3) + fz
+            ELSE IF (grid(3) .GT. nz) THEN
+                ptr%positions(3) = ptr%positions(3) - fz
+            ELSE
+                !ptr%positions(3) = ptr%positions(3)
+            END IF
+        END SUBROUTINE migration
+        SUBROUTINE boundary(array, string)
+            REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3), INTENT(INOUT) :: array
+            CHARACTER(len=*), INTENT(IN) :: string
+            INTEGER :: i, j, k
+
+            ! doundary x
+            DO i = 1, 3, 1
+                array(i, 1:ny, 1:nz) = array(i, 1:ny, 1:nz) + array(i+nx, 1:ny, 1:nz)
+                array(nx-i+1, 1:ny, 1:nz) = array(nx-i+1, 1:ny, 1:nz) + array(1-i, 1:ny, 1:nz)
+            END DO
+            ! doundary y
+            DO j = 1, 3, 1
+                array(1:nx, j, 1:nz) = array(1:nx, j, 1:nz) + array(1:nx, j+ny, 1:nz)
+                array(1:nx, ny-j+1, 1:nz) = array(1:nx, ny-j+1, 1:nz) + array(1:nx, 1-j, 1:nz)
+            END DO
+            ! doundary x
+            DO k = 1, 3, 1
+                array(1:nx, 1:ny, k) = array(1:nx, 1:ny, k) + array(1:nx, 1:ny, k+nz)
+                array(1:nx, 1:ny, nz-k+1) = array(1:nx, 1:ny, nz-k+1) + array(1:nx, 1:ny, 1-k)
+            END DO
+            ! real density
+            SELECT CASE (string)
+                CASE ('density')
+                    array(:,:,:) = array(:,:,:)/(dx*dy*dz)
+            END SELECT
+        END SUBROUTINE boundary
+
+        SUBROUTINE grid_array(array, head, sum_array, string, n)
+            REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3), INTENT(INOUT) :: array
+            TYPE (particle), POINTER, INTENT(INOUT) :: head
+            REAL(num), INTENT(INOUT) :: sum_array
+            CHARACTER(len=*), INTENT(IN) :: string
+            INTEGER, INTENT(INOUT) :: n
+            TYPE (particle), POINTER :: ptr
+            REAL(num), DIMENSION(3) :: point
+            REAL(num), DIMENSION(-1:1) :: gx, gy, gz
+            INTEGER, DIMENSION(3) :: grid
+            INTEGER :: i, total_particle
+            LOGICAL :: ifdomain
+
+            ptr => head
+            total_particle = n
+            DO i = 1, n, 1
+                SELECT CASE (string)
+                    CASE ('density')
+                        CALL copied_grid(ptr%positions, point, gx, gy, gz, grid)
+                        CALL update_array(array, ptr%weight, sum_array, gx, gy, gz, grid)
+                        CALL migration(ptr, grid)
+                    CASE ('energy')
+                        CALL copied_grid(ptr%energy_positions, point, gx, gy, gz, grid)
+                        CALL ifindomain(grid, ifdomain)
+                        IF (.NOT. ifdomain) THEN
+                            CALL deleteparticle(ptr, head, total_particle)
+                        ELSE
+                            CALL update_array(array, ptr%energy_diposition, sum_array, gx, gy, gz, grid)
+                            !CALL migration(ptr, grid)
+                            !WRITE(*, *) 'migration done'
+                        END IF
+                    CASE DEFAULT
+                        WRITE(*, *) 'Nothing to do!'
+                        EXIT
+                END SELECT
+                ptr => ptr%next
+                !WRITE(*, *) grid
+            END DO
+            n = total_particle
+            WRITE(*, *) total_particle
+            CALL boundary(array, string)
+            !CALL write_array(array, string)
+        END SUBROUTINE grid_array
+END MODULE particle_to_grid
+
+MODULE push_particle
+    USE shared_data
+    USE particle_to_grid
+    IMPLICIT NONE
+    CONTAINS
+        SUBROUTINE ifinRCF(positions, ifrcf)
+            REAL(num), DIMENSION(3), INTENT(IN) :: positions
+            LOGICAL, INTENT(INOUT) :: ifrcf
+            LOGICAL :: ifx, ify, ifz
+            IF (continous) THEN
+                ifx = ((positions(1) .GE. rcf_x_min1) .AND. (positions(1) .LE. rcf_x_max1) .OR. &
+                       (positions(1) .GE. rcf_x_min2) .AND. (positions(1) .LE. rcf_x_max2) .OR. &
+                       (positions(1) .GE. rcf_x_min3) .AND. (positions(1) .LE. rcf_x_max4) .OR. &
+                       (positions(1) .GE. rcf_x_min4) .AND. (positions(1) .LE. rcf_x_max4))
+            ELSE
+                ifx = ((positions(1) .GE. rcf_x_min) .AND. (positions(1) .LE. rcf_x_max))
+            END IF
+            ify = ((positions(2) .GE. rcf_y_min) .AND. (positions(2) .LE. rcf_y_max))
+            ifz = ((positions(3) .GE. rcf_z_min) .AND. (positions(3) .LE. rcf_z_max))
+            ifrcf = ifx .AND. ify .AND. ifz
+        END SUBROUTINE ifinRCF
+        SUBROUTINE particle_in_rcf(ptr, total_particle_energy, dt, vmax)
+            TYPE (particle), POINTER, INTENT(IN) :: ptr
+            REAL(num), INTENT(INOUT) :: total_particle_energy
+            REAL(num), INTENT(IN) :: dt
+            REAL(num), INTENT(INOUT) :: vmax
+            REAL(num) :: energy, d_energy
+            REAL(num) :: s
+            INTEGER :: i, j, k
+            REAL(num) :: p, alphas, betas, gammas
+
+            !energy = (ptr%momentum(1)**2 + ptr%momentum(2)**2 + ptr%momentum(3)**2)//2.0/mi
+            energy = ptr%energy
+            ! if energy great than 0, push particle
+            IF (energy .GT. 0._num) THEN
+                ! calculate stopping power
+                s = s0*(LOG(energy) + si)/energy
+                ! if s > 0, push particle 0.5*dt
+                IF (s .GT. 0) THEN
+                    d_energy = - 0.5*dt*(SQRT(2*energy/mi))*s
+                    ! if energy less than 0, stop particle
+                    IF ((energy + d_energy) .LE. 0._num) THEN
+                        DO i = 1, 3, 1
+                            ptr%energy_positions(i) = ptr%positions(i) + ptr%momentum(i)/mi*0.25*dt
+                            ptr%positions(i) = ptr%positions(i) + ptr%momentum(i)/mi*0.5*dt
+                            ptr%momentum(i) = 0._num
+                        END DO
+                        ptr%energy = 0._num
+                        ptr%energy_diposition = energy
+                    ! if energy great than 0, push particle another 0.5*dt
+                    ELSE
+                        DO i = 1, 3, 1
+                            ptr%energy_positions(i) = ptr%positions(i) + ptr%momentum(i)/mi*0.5*dt
+                            ptr%positions(i) = ptr%positions(i) + ptr%momentum(i)/mi*dt
+                        END DO
+                        !energy = energy + 2*d_energy
+                        ! if energy less than 0, stop particle
+                        IF ((energy + 2*d_energy) .LE. 0._num) THEN
+                            ptr%energy = 0._num
+                            ptr%momentum(:) = 0._num
+                            ptr%energy_diposition = energy
+                        ! if energy great than 0, push particle continue
+                        ELSE
+                            ptr%energy = energy + 2*d_energy
+                            p = SQRT(2*mi*(ptr%energy))
+                            DO i = 1, 3, 1
+                                ptr%momentum(i) = p * ptr%cos_theta(i)
+                            END DO
+                            ptr%energy_diposition = -2*d_energy
+                            IF(p/mi .GT. vmax) vmax = p/mi
+                        END IF
+                    END IF
+                ! if s < 0, stop particle
+                ELSE
+                    DO i = 1, 3, 1
+                        ptr%energy_positions(i) = ptr%positions(i)
+                        ptr%momentum(i) = 0_num
+                    END DO
+                    ptr%energy = 0._num
+                    ptr%energy_diposition = energy
+                END IF
+            ! if energy equal 0, do nothing
+            ELSE
+                ptr%energy_diposition = 0._num
+            END IF
+            total_particle_energy = total_particle_energy + ptr%energy
+        END SUBROUTINE particle_in_rcf
+        SUBROUTINE particle_out_rcf(ptr, total_particle_energy, dt, vmax)
+            TYPE (particle), POINTER, INTENT(IN) :: ptr
+            REAL(num), INTENT(INOUT) :: total_particle_energy
+            REAL(num), INTENT(IN) :: dt
+            REAL(num), INTENT(INOUT) :: vmax
+            REAL(num) :: v
+            INTEGER :: i
+            v = SQRT(ptr%momentum(1)**2 + ptr%momentum(2)**2 + ptr%momentum(3)**2)/mi
+            IF (v .GT. vmax) vmax = v
+            DO i = 1, 3, 1
+                ptr%positions(i) = ptr%positions(i) + ptr%momentum(i)/mi*dt
+                ptr%energy_positions(i) = ptr%positions(i)
+            END DO
+            total_particle_energy = total_particle_energy + ptr%energy
+        END SUBROUTINE particle_out_rcf
+
+        SUBROUTINE amplification(head, n)
+            TYPE (particle), POINTER, INTENT(IN) :: head
+            INTEGER, INTENT(IN) :: n
+            TYPE (particle), POINTER :: ptr
+            INTEGER :: i
+            REAL(num) :: L = 0._num
+            ptr => head
+            DO i = 1, n, 1
+                L = (x_min*di - ptr%positions(1))/ptr%cos_theta(1)
+                ptr%positions(1) = x_min*di
+                ptr%positions(2) = ptr%positions(2) + L*ptr%cos_theta(2)
+                ptr%positions(3) = ptr%positions(3) + L*ptr%cos_theta(3)
+                ptr%energy_positions(:) = ptr%positions(:)
+                ptr => ptr%next
+            END DO
+        END SUBROUTINE amplification
+
+        SUBROUTINE update_particle(energy, head, total_energy, n, step, dt, vmax)
+            REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3), INTENT(INOUT) :: energy
+            TYPE (particle), POINTER, INTENT(INOUT) :: head
+            REAL(num), DIMENSION(0:MAX_STEP, 3), INTENT(INOUT) :: total_energy
+            INTEGER, INTENT(INOUT) :: n
+            INTEGER, INTENT(IN) :: step
+            REAL(num), INTENT(IN) :: dt
+            REAL(num), INTENT(INOUT) :: vmax
+            TYPE (particle), POINTER :: ptr
+            REAL(num) :: total_particle_energy, total_diposition_energy = 0._num
+            INTEGER :: i, j, k
+            LOGICAL :: ifrcf
+
+            vmax = 0
+            ptr => head
+            total_particle_energy = 0._num
+            DO i = 1, n, 1
+                CALL ifinRCF(ptr%positions, ifrcf)
+                IF (ifrcf .EQV. .TRUE.) THEN
+                    CALL particle_in_rcf(ptr, total_particle_energy, dt, vmax)
+                ELSE
+                    CALL particle_out_rcf(ptr, total_particle_energy, dt, vmax)
+                END IF
+                ptr => ptr%next
+            END DO
+            !WRITE(*, *) 'loop done!'
+            CALL grid_array(energy, head, total_diposition_energy, 'energy', n)
+            total_energy(step, 1) = total_diposition_energy
+            total_energy(step, 2) = total_particle_energy
+            total_energy(step, 3) = total_energy(step, 1) + total_energy(step, 2)
+            !WRITE(*, *) total_particle_energy, total_diposition_energy, total_particle_energy+total_diposition_energy
+            !CALL total_energy(energy, head, total_particle_energy, total_diposition_energy, n)
+        END SUBROUTINE update_particle
+
+END MODULE push_particle
+! main loop
+PROGRAM main
+    USE shared_data
+    USE gemetry
+    USE particle_to_grid
+    USE push_particle
+    IMPLICIT NONE
+    !INTERFACE
+    !    FUNCTION read_data(n) RESULT (head)
+    !        USE shared_data
+    !        INTEGER, INTENT(INOUT) :: n
+    !        TYPE (particle), POINTER :: head
+    !    END FUNCTION read_data
+    !    TYPE (axis) FUNCTION define_axis()
+    !        USE shared_data
+    !    END FUNCTION define_axis
+    !END INTERFACE
+    TYPE (particle), POINTER :: head
+    TYPE (axis) :: cordinate
+    REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3) :: density
+    REAL(num), DIMENSION(-2:nx+3, -2:ny+3, -2:nz+3) :: energy = 0._num
+    REAL(num), DIMENSION(0:MAX_STEP, 3) :: total_energy = 0._num
+    REAL(num), DIMENSION(0:MAX_STEP) :: time_duration = 0._num
+    REAL(num) :: total_particle_number
+    !REAL(num), DIMENSION(3) :: point
+    !REAL(num), DIMENSION(sf_min:sf_max) :: gx, gy, gz
+    !INTEGER, DIMENSION(3) :: grid
+    REAL(num) :: dt, vmax, t = 0
+    INTEGER :: step, time, time0 = -1
+    INTEGER :: n = 0
+    CHARACTER(4) :: filenumber
+    head => read_data(n)
+    !n = 1000
+    cordinate = define_axis()
+    dt = MIN(dx/c, dy/c, dz/c)
+    total_energy(0,2) = n * ek 
+    total_energy(0,3) = total_energy(0,2)
+    vmax = 0
+    IF (.NOT. continous) CALL amplification(head, n)
+    WRITE(*, *) 'first = ', head%positions(1)
+    WRITE(*, *) n
+    DO step = 1, MAX_STEP, 1
+        t = t + dt
+        time_duration(step) = t/t0
+        CALL update_particle(energy, head, total_energy, n, step, dt, vmax)
+        IF (write_density) THEN
+            time = AINT(t/t0)
+            IF (time .GT. time0) THEN
+                time0 = time
+                density(:,:,:) = 0._num
+                total_particle_number = 0._num
+                CALL grid_array(density, head, total_particle_number, 'density', n)
+                !WRITE(*, *) 'Total number of real particle is ', total_particle_number
+                WRITE(filenumber, '(I4.4)') time0
+                CALL write_array(density, 'density_'//filenumber)
+            END IF
+        END IF
+        WRITE (*, *) head%positions(1)
+        dt = 0.5*MIN(dx/vmax, dy/vmax, dz/vmax)
+        WRITE(*, *) 'Step ', step, ' OK!'
+        WRITE(*, *) 'dt = ', dt, 'vmax = ', vmax
+        IF (vmax .EQ. 0._num) EXIT
+    END DO
+    CALL write_array(energy, 'energy')
+    CALL write_vector(time_duration(0:step), step+1, 'time_duration')
+    CALL write_vector(total_energy(0:step, 1), step+1, 'total_diposition_energy')
+    CALL write_vector(total_energy(0:step, 2), step+1, 'total_particle_energy')
+    CALL write_vector(total_energy(0:step, 3), step+1, 'total_energy')
+    CALL write_vector(cordinate%x(1:nx), nx, 'x')
+    CALL write_vector(cordinate%y(1:ny), ny, 'y')
+    CALL write_vector(cordinate%z(1:nz), nz, 'z')
+    !CALL write_vector(RESHAPE(total_energy(0:step, 3), (/3*(step+1)/)), 3*(step+1), 'total_energy')
+    !WRITE(*, *) density(30:90, 100, 100)
+    !WRITE(*, *) energy(30:90, 100, 100)
+    !CALL write_density(density)
+    !DO i = 1, 1, 1
+    !    WRITE (*, *) ptr%positions(1)
+    !    ptr => ptr%p
+    !END DO
+    !WRITE (*, *) cordinate%x
+    !WRITE(*, *) gz(-1) + gz(0) + gz(1)
+    !WRITE(*, *) x_min, x_max, rcf_x_min, rcf_x_max
+    !WRITE(*, *) dx, dy, dz, di
+    !WRITE(*, *) dt*c
+END PROGRAM main
